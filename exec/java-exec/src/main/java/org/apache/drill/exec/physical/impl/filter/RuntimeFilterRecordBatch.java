@@ -89,7 +89,6 @@ public class RuntimeFilterRecordBatch extends AbstractSingleRecordBatch<RuntimeF
 
   @Override
   protected IterOutcome doWork() {
-    container.transferIn(incoming.getContainer());
     originalRecordCount = incoming.getRecordCount();
     sv2.setBatchActualRecordCount(originalRecordCount);
     try {
@@ -97,6 +96,7 @@ public class RuntimeFilterRecordBatch extends AbstractSingleRecordBatch<RuntimeF
     } catch (SchemaChangeException e) {
       throw new UnsupportedOperationException(e);
     }
+    container.transferIn(incoming.getContainer());
     return getFinalOutcome(false);
   }
 
@@ -160,7 +160,7 @@ public class RuntimeFilterRecordBatch extends AbstractSingleRecordBatch<RuntimeF
     if (!runtimeFilterSink.containOne()) {
       return;
     }
-    if (runtimeFilterSink.hasFreshOne()) {
+    if (runtimeFilterSink.hasFreshOne() || current == null) {
       RuntimeFilterWritable freshRuntimeFilterWritable = runtimeFilterSink.fetchLatestDuplicatedAggregatedOne();
       if (current == null) {
         current = freshRuntimeFilterWritable;

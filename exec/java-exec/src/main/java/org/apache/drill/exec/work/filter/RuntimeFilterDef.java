@@ -20,11 +20,7 @@ package org.apache.drill.exec.work.filter;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-
 import com.fasterxml.jackson.annotation.JsonProperty;
-import org.apache.drill.exec.physical.base.GroupScan;
-
-
 import java.util.List;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -37,9 +33,9 @@ public class RuntimeFilterDef {
   private List<BloomFilterDef> bloomFilterDefs;
 
   private boolean sendToForeman;
-  @JsonIgnore
-  private GroupScan probeSideGroupScan;
 
+  @JsonIgnore
+  private long runtimeFilterIdentifier;
 
   @JsonCreator
   public RuntimeFilterDef(@JsonProperty("generateBloomFilter") boolean generateBloomFilter, @JsonProperty("generateMinMaxFilter") boolean generateMinMaxFilter,
@@ -84,12 +80,11 @@ public class RuntimeFilterDef {
     this.sendToForeman = sendToForeman;
   }
 
-  @JsonIgnore
-  public GroupScan getProbeSideGroupScan() {
-    return probeSideGroupScan;
+  public long getRuntimeFilterIdentifier() {
+    return runtimeFilterIdentifier;
   }
 
-  public void setProbeSideGroupScan(GroupScan probeSideGroupScan) {
-    this.probeSideGroupScan = probeSideGroupScan;
+  public void setRuntimeFilterIdentifier(long runtimeFilterIdentifier) {
+    this.runtimeFilterIdentifier = runtimeFilterIdentifier;
   }
 }

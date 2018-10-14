@@ -103,6 +103,12 @@ public class RuntimeFilterWritable implements AutoCloseables.Closeable{
     return new RuntimeFilterWritable(runtimeFilterBDef, cloned);
   }
 
+  public void retainBuffers(final int increment) {
+    for (final DrillBuf buf : data) {
+      buf.retain(increment);
+    }
+  }
+
   public String toString() {
     return identifier;
   }

@@ -115,7 +115,8 @@ public class RuntimeFilterSink implements AutoCloseable {
   public RuntimeFilterWritable fetchLatestDuplicatedAggregatedOne() {
     try {
       aggregatedRFLock.lock();
-      return aggregated.duplicate(bufferAllocator);
+      RuntimeFilterWritable duplicated = aggregated.duplicate(bufferAllocator);
+      return duplicated;
     } finally {
       aggregatedRFLock.unlock();
     }
@@ -197,7 +198,6 @@ public class RuntimeFilterSink implements AutoCloseable {
             aggregatedRFLock.lock();
             if (containOne()) {
               aggregated.aggregate(toAggregate);
-
               // Release the byteBuf referenced by toAggregate since aggregate will not do it
               toAggregate.close();
             } else {
