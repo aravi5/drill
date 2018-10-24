@@ -400,7 +400,7 @@ public class WorkManager implements AutoCloseable {
               final String originalName = currentThread.getName();
               currentThread.setName(queryIdStr + ":foreman:routeRuntimeFilter");
               try {
-                foreman.getRuntimeFilterRouter().route(runtimeFilter);
+                foreman.getRuntimeFilterRouter().register(runtimeFilter);
               } catch (Exception e) {
                 logger.warn("Exception while registering the RuntimeFilter", e);
               } finally {

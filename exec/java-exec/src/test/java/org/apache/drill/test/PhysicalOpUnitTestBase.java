@@ -311,6 +311,11 @@ public class PhysicalOpUnitTestBase extends ExecTest {
     }
 
     @Override
+    public RuntimeFilterWritable getRuntimeFilter() {
+      return null;
+    }
+
+    @Override
     public RuntimeFilterSink getRuntimeFilterSink() {
       return runtimeFilterSink;
     }

@@ -1222,7 +1222,7 @@ public class HashJoinBatch extends AbstractBinaryRecordBatch<HashJoinPOP> implem
     RecordBatchStats.logRecordBatchStats(getRecordBatchStatsContext(),
       "configured output batch size: %d", configuredBatchSize);
 
-    enableRuntimeFilter = context.getOptions().getOption(ExecConstants.HASHJOIN_ENABLE_RUNTIME_FILTER);
+    enableRuntimeFilter = context.getOptions().getOption(ExecConstants.HASHJOIN_ENABLE_RUNTIME_FILTER) && popConfig.getRuntimeFilterDef() != null;
   }
 
   /**
