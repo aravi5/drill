@@ -80,23 +80,6 @@ public class RuntimeFilterSink implements AutoCloseable {
   public void aggregate(RuntimeFilterWritable runtimeFilterWritable) {
     if (running.get()) {
       try {
-        aggregatedRFLock.lock();
-        if (containOne()) {
-          boolean same = aggregated.equals(runtimeFilterWritable);
-          if (!same) {
-            // This is to solve the only one fragment case that two RuntimeFilterRecordBatchs
-            // share the same FragmentContext.
-            aggregated.close();
-            currentBookId.set(0);
-            staleBookId = 0;
-            clearQueued(false);
-          }
-        }
-      } finally {
-        aggregatedRFLock.unlock();
-      }
-
-      try {
         queueLock.lock();
         if (rfQueue != null) {
           rfQueue.add(runtimeFilterWritable);
@@ -115,7 +98,8 @@ public class RuntimeFilterSink implements AutoCloseable {
   public RuntimeFilterWritable fetchLatestDuplicatedAggregatedOne() {
     try {
       aggregatedRFLock.lock();
-      return aggregated.duplicate(bufferAllocator);
+      RuntimeFilterWritable duplicated = aggregated.duplicate(bufferAllocator);
+      return duplicated;
     } finally {
       aggregatedRFLock.unlock();
     }
@@ -197,7 +181,6 @@ public class RuntimeFilterSink implements AutoCloseable {
             aggregatedRFLock.lock();
             if (containOne()) {
               aggregated.aggregate(toAggregate);
-
               // Release the byteBuf referenced by toAggregate since aggregate will not do it
               toAggregate.close();
             } else {

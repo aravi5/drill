@@ -20,7 +20,6 @@ package org.apache.drill.exec.expr.fn.impl;
 import io.netty.buffer.DrillBuf;
 import io.netty.util.internal.PlatformDependent;
 
-
 /**
  *
  * MurmurHash3 was written by Austin Appleby, and is placed in the public
@@ -271,6 +270,5 @@ public final class MurmurHash3 extends DrillHash{
   public static int hash32(int start, int end, DrillBuf buffer, int seed) {
     return murmur3_32(start, end, buffer, seed);
   }
-
 }
 

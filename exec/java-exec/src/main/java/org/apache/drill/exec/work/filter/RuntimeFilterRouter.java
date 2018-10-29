@@ -17,7 +17,6 @@
  */
 package org.apache.drill.exec.work.filter;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.buffer.DrillBuf;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.drill.exec.ops.AccountingDataTunnel;
@@ -26,9 +25,9 @@ import org.apache.drill.exec.ops.SendingAccountor;
 import org.apache.drill.exec.ops.StatusHandler;
 import org.apache.drill.exec.physical.base.AbstractPhysicalVisitor;
 import org.apache.drill.exec.physical.base.Exchange;
-import org.apache.drill.exec.physical.base.GroupScan;
 import org.apache.drill.exec.physical.base.PhysicalOperator;
 import org.apache.drill.exec.physical.config.HashJoinPOP;
+import org.apache.drill.exec.physical.config.RuntimeFilterPOP;
 import org.apache.drill.exec.planner.fragment.Fragment;
 import org.apache.drill.exec.planner.fragment.Wrapper;
 import org.apache.drill.exec.proto.BitData;
@@ -42,9 +41,6 @@ import org.apache.drill.exec.server.DrillbitContext;
 import org.apache.drill.exec.work.QueryWorkUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -69,12 +65,17 @@ import java.util.concurrent.ConcurrentHashMap;
 public class RuntimeFilterRouter {
 
   private Wrapper rootWrapper;
+
   //HashJoin node's major fragment id to its corresponding probe side nodes's endpoints
-  private Map<Integer, List<CoordinationProtos.DrillbitEndpoint>> joinMjId2probdeScanEps = new HashMap<>();
-  //HashJoin node's major fragment id to its corresponding probe side nodes's number
-  private Map<Integer, Integer> joinMjId2scanSize = new ConcurrentHashMap<>();
+  private Map<Integer, List<CoordinationProtos.DrillbitEndpoint>> joinMjId2probeScanEps = new HashMap<>();
+
   //HashJoin node's major fragment id to its corresponding probe side scan node's belonging major fragment id
   private Map<Integer, Integer> joinMjId2ScanMjId = new HashMap<>();
+
+  //HashJoin node's major fragment id to its aggregated RuntimeFilterWritable
+  private Map<Integer, RuntimeFilterWritable> joinMjId2AggregatedRF = new ConcurrentHashMap<>();
+
+  private Map<Integer, Integer> joinMjId2rfNumber = new ConcurrentHashMap<>();
 
   private DrillbitContext drillbitContext;
 
@@ -86,6 +87,7 @@ public class RuntimeFilterRouter {
    * This class maintains context for the runtime join push down's filter management. It
    * does a traversal of the physical operators by leveraging the root wrapper which indirectly
    * holds the global PhysicalOperator tree and contains the minor fragment endpoints.
+   *
    * @param workUnit
    * @param drillbitContext
    */
@@ -107,13 +109,14 @@ public class RuntimeFilterRouter {
       List<CoordinationProtos.DrillbitEndpoint> probeSideEndpoints = holder.getProbeSideScanEndpoints();
       int probeSideScanMajorId = holder.getProbeSideScanMajorId();
       int joinNodeMajorId = holder.getJoinMajorId();
+      int buildSideRfNumber = holder.getBuildSideRfNumber();
       RuntimeFilterDef runtimeFilterDef = holder.getRuntimeFilterDef();
       boolean sendToForeman = runtimeFilterDef.isSendToForeman();
       if (sendToForeman) {
         //send RuntimeFilter to Foreman
-        joinMjId2probdeScanEps.put(joinNodeMajorId, probeSideEndpoints);
-        joinMjId2scanSize.put(joinNodeMajorId, probeSideEndpoints.size());
+        joinMjId2probeScanEps.put(joinNodeMajorId, probeSideEndpoints);
         joinMjId2ScanMjId.put(joinNodeMajorId, probeSideScanMajorId);
+        joinMjId2rfNumber.put(joinNodeMajorId, buildSideRfNumber);
       }
     }
   }
@@ -125,33 +128,53 @@ public class RuntimeFilterRouter {
 
   /**
    * This method is passively invoked by receiving a runtime filter from the network
-   * @param runtimeFilterWritable
+   *
+   * @param srcRuntimeFilterWritable
    */
-  public void registerRuntimeFilter(RuntimeFilterWritable runtimeFilterWritable) {
-    broadcastAggregatedRuntimeFilter(runtimeFilterWritable);
+  public void register(RuntimeFilterWritable srcRuntimeFilterWritable) {
+    BitData.RuntimeFilterBDef runtimeFilterB = srcRuntimeFilterWritable.getRuntimeFilterBDef();
+    int joinMajorId = runtimeFilterB.getMajorFragmentId();
+    int buildSideRfNumber;
+    RuntimeFilterWritable toAggregated;
+    synchronized (this) {
+      buildSideRfNumber = joinMjId2rfNumber.get(joinMajorId);
+      buildSideRfNumber--;
+      joinMjId2rfNumber.put(joinMajorId, buildSideRfNumber);
+      toAggregated = joinMjId2AggregatedRF.get(joinMajorId);
+      if (toAggregated == null) {
+        toAggregated = srcRuntimeFilterWritable;
+        toAggregated.retainBuffers(1);
+      } else {
+        toAggregated.aggregate(srcRuntimeFilterWritable);
+      }
+      joinMjId2AggregatedRF.put(joinMajorId, toAggregated);
+    }
+    if (buildSideRfNumber == 0) {
+      joinMjId2AggregatedRF.remove(joinMajorId);
+      route(toAggregated);
+    }
   }
 
-
-  private void broadcastAggregatedRuntimeFilter(RuntimeFilterWritable srcRuntimeFilterWritable) {
+  private void route(RuntimeFilterWritable srcRuntimeFilterWritable) {
     BitData.RuntimeFilterBDef runtimeFilterB = srcRuntimeFilterWritable.getRuntimeFilterBDef();
     int joinMajorId = runtimeFilterB.getMajorFragmentId();
     UserBitShared.QueryId queryId = runtimeFilterB.getQueryId();
     List<String> probeFields = runtimeFilterB.getProbeFieldsList();
+    List<Integer> sizeInBytes = runtimeFilterB.getBloomFilterSizeInBytesList();
     DrillBuf[] data = srcRuntimeFilterWritable.getData();
-    List<CoordinationProtos.DrillbitEndpoint> scanNodeEps = joinMjId2probdeScanEps.get(joinMajorId);
+    List<CoordinationProtos.DrillbitEndpoint> scanNodeEps = joinMjId2probeScanEps.get(joinMajorId);
+    int scanNodeSize = scanNodeEps.size();
+    srcRuntimeFilterWritable.retainBuffers(scanNodeSize - 1);
     int scanNodeMjId = joinMjId2ScanMjId.get(joinMajorId);
     for (int minorId = 0; minorId < scanNodeEps.size(); minorId++) {
       BitData.RuntimeFilterBDef.Builder builder = BitData.RuntimeFilterBDef.newBuilder();
       for (String probeField : probeFields) {
         builder.addProbeFields(probeField);
       }
-      BitData.RuntimeFilterBDef runtimeFilterBDef = builder
-        .setQueryId(queryId)
-        .setMajorFragmentId(scanNodeMjId)
-        .setMinorFragmentId(minorId)
-        .build();
+      BitData.RuntimeFilterBDef runtimeFilterBDef = builder.setQueryId(queryId).setMajorFragmentId(scanNodeMjId).setMinorFragmentId(minorId).setToForeman(false).addAllBloomFilterSizeInBytes(sizeInBytes).build();
       RuntimeFilterWritable runtimeFilterWritable = new RuntimeFilterWritable(runtimeFilterBDef, data);
       CoordinationProtos.DrillbitEndpoint drillbitEndpoint = scanNodeEps.get(minorId);
+
       DataTunnel dataTunnel = drillbitContext.getDataConnectionsPool().getTunnel(drillbitEndpoint);
       Consumer<RpcException> exceptionConsumer = new Consumer<RpcException>() {
         @Override
@@ -183,18 +206,29 @@ public class RuntimeFilterRouter {
       boolean isHashJoinOp = op instanceof HashJoinPOP;
       if (isHashJoinOp) {
         HashJoinPOP hashJoinPOP = (HashJoinPOP) op;
+        int hashJoinOpId = hashJoinPOP.getOperatorId();
         RuntimeFilterDef runtimeFilterDef = hashJoinPOP.getRuntimeFilterDef();
-        if (runtimeFilterDef != null) {
-          if (holder == null) {
-            holder = new RFHelperHolder();
+        if (runtimeFilterDef != null && runtimeFilterDef.isSendToForeman()) {
+          if (holder == null || holder.getJoinOpId() != hashJoinOpId) {
+            holder = new RFHelperHolder(hashJoinOpId);
             holders.add(holder);
           }
           holder.setRuntimeFilterDef(runtimeFilterDef);
-          GroupScan probeSideScanOp = runtimeFilterDef.getProbeSideGroupScan();
-          Wrapper container = findPhysicalOpContainer(rootWrapper, hashJoinPOP);
+          long runtimeFilterIdentifier = runtimeFilterDef.getRuntimeFilterIdentifier();
+          WrapperOperatorsVisitor operatorsVisitor = new WrapperOperatorsVisitor(hashJoinPOP);
+          Wrapper container = findTargetWrapper(rootWrapper, operatorsVisitor);
+          if (container == null) {
+            throw new IllegalStateException(String.format("No valid Wrapper found for HashJoinPOP with id=%d", hashJoinPOP.getOperatorId()));
+          }
+          int buildSideRFNumber = container.getAssignedEndpoints().size();
+          holder.setBuildSideRfNumber(buildSideRFNumber);
           int majorFragmentId = container.getMajorFragmentId();
           holder.setJoinMajorId(majorFragmentId);
-          Wrapper probeSideScanContainer = findPhysicalOpContainer(rootWrapper, probeSideScanOp);
+          WrapperRuntimeFilterOperatorsVisitor runtimeFilterOperatorsVisitor = new WrapperRuntimeFilterOperatorsVisitor(runtimeFilterIdentifier);
+          Wrapper probeSideScanContainer = findTargetWrapper(container, runtimeFilterOperatorsVisitor);
+          if (probeSideScanContainer == null) {
+            throw new IllegalStateException(String.format("No valid Wrapper found for RuntimeFilterPOP with id=%d", op.getOperatorId()));
+          }
           int probeSideScanMjId = probeSideScanContainer.getMajorFragmentId();
           List<CoordinationProtos.DrillbitEndpoint> probeSideScanEps = probeSideScanContainer.getAssignedEndpoints();
           holder.setProbeSideScanEndpoints(probeSideScanEps);
@@ -209,87 +243,10 @@ public class RuntimeFilterRouter {
     }
   }
 
-  private class WrapperOperatorsVisitor extends AbstractPhysicalVisitor<Void, Void, RuntimeException> {
-
-    private Fragment fragment;
-
-    private boolean contain = false;
-
-    private boolean targetIsGroupScan;
-
-    private boolean targetIsHashJoin;
-
-    private String targetGroupScanDigest;
-
-    private String targetHashJoinJson;
-
-
-    public WrapperOperatorsVisitor(PhysicalOperator targetOp, Fragment fragment) {
-      this.fragment = fragment;
-      this.targetIsGroupScan = targetOp instanceof GroupScan;
-      this.targetIsHashJoin = targetOp instanceof HashJoinPOP;
-      this.targetGroupScanDigest = targetIsGroupScan ? ((GroupScan) targetOp).getDigest() : null;
-      this.targetHashJoinJson = targetIsHashJoin ? jsonOfPhysicalOp(targetOp) : null;
-    }
-
-    @Override
-    public Void visitExchange(Exchange exchange, Void value) throws RuntimeException {
-      List<Fragment.ExchangeFragmentPair> exchangeFragmentPairs = fragment.getReceivingExchangePairs();
-      for (Fragment.ExchangeFragmentPair exchangeFragmentPair : exchangeFragmentPairs) {
-        boolean same = exchange == exchangeFragmentPair.getExchange();
-        if (same) {
-          return null;
-        }
-      }
-      return exchange.getChild().accept(this, value);
-    }
-
-    @Override
-    public Void visitOp(PhysicalOperator op, Void value) throws RuntimeException {
-      boolean same = false;
-      if (targetIsGroupScan && op instanceof GroupScan) {
-        //Since GroupScan may be rewrite during the planing, here we use the digest to identify it.
-        String currentDigest = ((GroupScan) op).getDigest();
-        same = targetGroupScanDigest.equals(currentDigest);
-      }
-      if (targetIsHashJoin && op instanceof HashJoinPOP) {
-        String currentOpJson = jsonOfPhysicalOp(op);
-        same = targetHashJoinJson.equals(currentOpJson);
-      }
-      if (!same) {
-        for (PhysicalOperator child : op) {
-          child.accept(this, value);
-        }
-      } else {
-        contain = true;
-      }
-      return null;
-    }
-
-    public boolean isContain() {
-      return contain;
-    }
-
-    public String jsonOfPhysicalOp(PhysicalOperator operator) {
-      try {
-        ObjectMapper objectMapper = new ObjectMapper();
-        StringWriter stringWriter = new StringWriter();
-        objectMapper.writeValue(stringWriter, operator);
-        return stringWriter.toString();
-      } catch (IOException e) {
-        throw new RuntimeException(e);
-      }
-    }
-  }
-
-  private boolean containsPhysicalOperator(Wrapper wrapper, PhysicalOperator op) {
-    WrapperOperatorsVisitor wrapperOpsVistitor = new WrapperOperatorsVisitor(op, wrapper.getNode());
-    wrapper.getNode().getRoot().accept(wrapperOpsVistitor, null);
-    return wrapperOpsVistitor.isContain();
-  }
-
-  private Wrapper findPhysicalOpContainer(Wrapper wrapper, PhysicalOperator op) {
-    boolean contain = containsPhysicalOperator(wrapper, op);
+  private Wrapper findTargetWrapper(Wrapper wrapper, TargetPhysicalOperatorVisitor targetOpVisitor) {
+    targetOpVisitor.setCurrentFragment(wrapper.getNode());
+    wrapper.getNode().getRoot().accept(targetOpVisitor, null);
+    boolean contain = targetOpVisitor.isContain();
     if (contain) {
       return wrapper;
     }
@@ -298,13 +255,110 @@ public class RuntimeFilterRouter {
       return null;
     }
     for (Wrapper dependencyWrapper : dependencies) {
-      Wrapper opContainer = findPhysicalOpContainer(dependencyWrapper, op);
+      Wrapper opContainer = findTargetWrapper(dependencyWrapper, targetOpVisitor);
       if (opContainer != null) {
         return opContainer;
       }
     }
-    //should not be here
-    throw new IllegalStateException(String.format("No valid Wrapper found for physicalOperator with id=%d", op.getOperatorId()));
+    return null;
+  }
+
+  private abstract class TargetPhysicalOperatorVisitor<T, X, E extends Throwable> extends AbstractPhysicalVisitor<T, X, E> {
+
+    protected Exchange sendingExchange;
+
+    public void setCurrentFragment(Fragment fragment) {
+      sendingExchange = fragment.getSendingExchange();
+    }
+
+    public abstract boolean isContain();
+  }
+
+  private class WrapperOperatorsVisitor extends TargetPhysicalOperatorVisitor<Void, Void, RuntimeException> {
+
+    private boolean contain = false;
+
+    private PhysicalOperator targetOp;
+
+    public WrapperOperatorsVisitor(PhysicalOperator targetOp) {
+      this.targetOp = targetOp;
+    }
+
+    @Override
+    public Void visitExchange(Exchange exchange, Void value) throws RuntimeException {
+      if (exchange != sendingExchange) {
+        return null;
+      }
+      return exchange.getChild().accept(this, value);
+    }
+
+    @Override
+    public Void visitOp(PhysicalOperator op, Void value) throws RuntimeException {
+      if (op == targetOp) {
+        contain = true;
+      } else {
+        for (PhysicalOperator child : op) {
+          child.accept(this, value);
+        }
+      }
+      return null;
+    }
+
+    public boolean isContain() {
+      return contain;
+    }
+  }
+
+  private class WrapperRuntimeFilterOperatorsVisitor extends TargetPhysicalOperatorVisitor<Void, Void, RuntimeException> {
+
+    private boolean contain = false;
+
+    private long identifier;
+
+
+    public WrapperRuntimeFilterOperatorsVisitor(long identifier) {
+      this.identifier = identifier;
+    }
+
+    @Override
+    public Void visitExchange(Exchange exchange, Void value) throws RuntimeException {
+      if (exchange != sendingExchange) {
+        return null;
+      }
+      return exchange.getChild().accept(this, value);
+    }
+
+    @Override
+    public Void visitOp(PhysicalOperator op, Void value) throws RuntimeException {
+      boolean same;
+      boolean isRuntimeFilterPop = op instanceof RuntimeFilterPOP;
+      boolean isHashJoinPop = op instanceof HashJoinPOP;
+
+      if (isHashJoinPop) {
+        HashJoinPOP hashJoinPOP = (HashJoinPOP) op;
+        PhysicalOperator leftPop = hashJoinPOP.getLeft();
+        leftPop.accept(this, value);
+        return null;
+      }
+
+      if (isRuntimeFilterPop) {
+        RuntimeFilterPOP runtimeFilterPOP = (RuntimeFilterPOP) op;
+        same = this.identifier == runtimeFilterPOP.getIdentifier();
+        if (same) {
+          contain = true;
+        }
+        return null;
+      } else {
+        for (PhysicalOperator child : op) {
+          child.accept(this, value);
+        }
+      }
+      return null;
+    }
+
+    public boolean isContain() {
+      return contain;
+    }
   }
 
   /**
@@ -319,6 +373,22 @@ public class RuntimeFilterRouter {
     private List<CoordinationProtos.DrillbitEndpoint> probeSideScanEndpoints;
 
     private RuntimeFilterDef runtimeFilterDef;
+
+    private int joinOpId;
+
+    private int buildSideRfNumber;
+
+    public RFHelperHolder(int joinOpId) {
+      this.joinOpId = joinOpId;
+    }
+
+    public int getJoinOpId() {
+      return joinOpId;
+    }
+
+    public void setJoinOpId(int joinOpId) {
+      this.joinOpId = joinOpId;
+    }
 
     public List<CoordinationProtos.DrillbitEndpoint> getProbeSideScanEndpoints() {
       return probeSideScanEndpoints;
@@ -351,6 +421,14 @@ public class RuntimeFilterRouter {
 
     public void setRuntimeFilterDef(RuntimeFilterDef runtimeFilterDef) {
       this.runtimeFilterDef = runtimeFilterDef;
+    }
+
+    public int getBuildSideRfNumber() {
+      return buildSideRfNumber;
+    }
+
+    public void setBuildSideRfNumber(int buildSideRfNumber) {
+      this.buildSideRfNumber = buildSideRfNumber;
     }
   }
 }

@@ -138,6 +138,7 @@ public class FragmentContextImpl extends BaseFragmentContext implements Executor
   private final Map<String, Map<MinorType, ValueHolder>> constantValueHolderCache;
 
   private RuntimeFilterSink runtimeFilterSink;
+  private RuntimeFilterWritable runtimeFilterWritable;
 
   /**
    * Create a FragmentContext instance for non-root fragment.
@@ -209,11 +210,6 @@ public class FragmentContextImpl extends BaseFragmentContext implements Executor
     stats = new FragmentStats(allocator, fragment.getAssignment());
     bufferManager = new BufferManagerImpl(this.allocator);
     constantValueHolderCache = Maps.newHashMap();
-    boolean enableRF = context.getOptionManager().getOption(ExecConstants.HASHJOIN_ENABLE_RUNTIME_FILTER);
-    if (enableRF) {
-      ExecutorService executorService = context.getExecutor();
-      this.runtimeFilterSink = new RuntimeFilterSink(this.allocator, executorService);
-    }
   }
 
   /**
@@ -362,7 +358,12 @@ public class FragmentContextImpl extends BaseFragmentContext implements Executor
 
   @Override
   public void addRuntimeFilter(RuntimeFilterWritable runtimeFilter) {
-    this.runtimeFilterSink.aggregate(runtimeFilter);
+    this.runtimeFilterWritable = runtimeFilter;
+  }
+
+  @Override
+  public RuntimeFilterWritable getRuntimeFilter() {
+    return runtimeFilterWritable;
   }
 
   @Override

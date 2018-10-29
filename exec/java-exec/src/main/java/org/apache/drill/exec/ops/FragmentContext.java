@@ -171,6 +171,8 @@ public interface FragmentContext extends UdfUtilities, AutoCloseable {
    */
   public void addRuntimeFilter(RuntimeFilterWritable runtimeFilter);
 
+  public RuntimeFilterWritable getRuntimeFilter();
+
   interface ExecutorState {
     /**
      * Tells individual operations whether they should continue. In some cases, an external event (typically cancellation)

@@ -329,6 +329,11 @@ public class OperatorFixture extends BaseFixture implements AutoCloseable {
     }
 
     @Override
+    public RuntimeFilterWritable getRuntimeFilter() {
+      return null;
+    }
+
+    @Override
     public ContextInformation getContextInformation() {
       return null;
     }
