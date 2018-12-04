@@ -50,6 +50,8 @@ public final class ExecConstants {
   public static final String ZK_TIMEOUT = "drill.exec.zk.timeout";
   public static final String ZK_ROOT = "drill.exec.zk.root";
   public static final String ZK_REFRESH = "drill.exec.zk.refresh";
+  public static final String ZK_ACL_PROVIDER = "drill.exec.zk.acl_provider";
+  public static final String ZK_APPLY_SECURE_ACL = "drill.exec.zk.apply_secure_acl";
   public static final String BIT_RETRY_TIMES = "drill.exec.rpc.bit.server.retry.count";
   public static final String BIT_RETRY_DELAY = "drill.exec.rpc.bit.server.retry.delay";
   public static final String BIT_TIMEOUT = "drill.exec.bit.timeout";
@@ -151,6 +153,10 @@ public final class ExecConstants {
   public static final IntegerValidator HASHJOIN_BLOOM_FILTER_MAX_SIZE = new IntegerValidator(HASHJOIN_BLOOM_FILTER_MAX_SIZE_KEY, null);
   public static final String HASHJOIN_BLOOM_FILTER_FPP_KEY = "exec.hashjoin.bloom_filter.fpp";
   public static final DoubleValidator HASHJOIN_BLOOM_FILTER_FPP_VALIDATOR = new RangeDoubleValidator(HASHJOIN_BLOOM_FILTER_FPP_KEY, Double.MIN_VALUE, 1.0, null);
+  public static final String HASHJOIN_RUNTIME_FILTER_WAITING_ENABLE_KEY = "exec.hashjoin.runtime_filter.waiting.enable";
+  public static final BooleanValidator HASHJOIN_ENABLE_RUNTIME_FILTER_WAITING = new BooleanValidator(HASHJOIN_RUNTIME_FILTER_WAITING_ENABLE_KEY, null);
+  public static final String HASHJOIN_RUNTIME_FILTER_MAX_WAITING_TIME_KEY = "exec.hashjoin.runtime_filter.max.waiting.time";
+  public static final PositiveLongValidator HASHJOIN_RUNTIME_FILTER_MAX_WAITING_TIME = new PositiveLongValidator(HASHJOIN_RUNTIME_FILTER_MAX_WAITING_TIME_KEY, Character.MAX_VALUE, null);
 
 
 
@@ -333,6 +339,14 @@ public final class ExecConstants {
   public static final OptionValidator PARQUET_READER_INT96_AS_TIMESTAMP_VALIDATOR = new BooleanValidator(PARQUET_READER_INT96_AS_TIMESTAMP,
       new OptionDescription("Enables Drill to implicitly interpret the INT96 timestamp data type in Parquet files."));
 
+  public static final String PARQUET_READER_STRINGS_SIGNED_MIN_MAX = "store.parquet.reader.strings_signed_min_max";
+  public static final StringValidator PARQUET_READER_STRINGS_SIGNED_MIN_MAX_VALIDATOR = new EnumeratedStringValidator(PARQUET_READER_STRINGS_SIGNED_MIN_MAX,
+    new OptionDescription("Allows binary statistics usage for files created prior to 1.9.1 parquet library version where " +
+      "statistics was incorrectly calculated for UTF-8 data. For cases when user exactly knows " +
+      "that data in binary columns is in ASCII (not UTF-8), turning this property to 'true' " +
+      "enables statistics usage for varchar and decimal data types. Default is unset, i.e. empty string. " +
+      "Allowed values: 'true', 'false', '' (empty string)."), "true", "false", "");
+
   public static final String PARQUET_PAGEREADER_ASYNC = "store.parquet.reader.pagereader.async";
   public static final OptionValidator PARQUET_PAGEREADER_ASYNC_VALIDATOR = new BooleanValidator(PARQUET_PAGEREADER_ASYNC,
       new OptionDescription("Enable the asynchronous page reader. This pipelines the reading of data from disk for high performance."));
@@ -378,12 +392,17 @@ public final class ExecConstants {
 
   // Controls the flat parquet reader batching constraints (number of record and memory limit)
   public static final String PARQUET_FLAT_BATCH_NUM_RECORDS = "store.parquet.flat.batch.num_records";
-  public static final OptionValidator PARQUET_FLAT_BATCH_NUM_RECORDS_VALIDATOR = new RangeLongValidator(PARQUET_FLAT_BATCH_NUM_RECORDS, 1, ValueVector.MAX_ROW_COUNT,
+  public static final OptionValidator PARQUET_FLAT_BATCH_NUM_RECORDS_VALIDATOR = new RangeLongValidator(PARQUET_FLAT_BATCH_NUM_RECORDS, 1, ValueVector.MAX_ROW_COUNT -1,
       new OptionDescription("Parquet Reader maximum number of records per batch."));
   public static final String PARQUET_FLAT_BATCH_MEMORY_SIZE = "store.parquet.flat.batch.memory_size";
   // This configuration is used to overwrite the common memory batch sizing configuration property
   public static final OptionValidator PARQUET_FLAT_BATCH_MEMORY_SIZE_VALIDATOR = new RangeLongValidator(PARQUET_FLAT_BATCH_MEMORY_SIZE, 0, Integer.MAX_VALUE,
-      new OptionDescription("Parquet Reader maximum memory size per batch."));
+      new OptionDescription("Flat Parquet Reader maximum memory size per batch."));
+
+  // Controls the complex parquet reader batch sizing configuration
+  public static final String PARQUET_COMPLEX_BATCH_NUM_RECORDS = "store.parquet.complex.batch.num_records";
+  public static final OptionValidator PARQUET_COMPLEX_BATCH_NUM_RECORDS_VALIDATOR = new RangeLongValidator(PARQUET_COMPLEX_BATCH_NUM_RECORDS, 1, ValueVector.MAX_ROW_COUNT -1,
+      new OptionDescription("Complex Parquet Reader maximum number of records per batch."));
 
   public static final String JSON_ALL_TEXT_MODE = "store.json.all_text_mode";
   public static final BooleanValidator JSON_READER_ALL_TEXT_MODE_VALIDATOR = new BooleanValidator(JSON_ALL_TEXT_MODE,
@@ -499,8 +518,8 @@ public final class ExecConstants {
   public static final PositiveLongValidator SLICE_TARGET_OPTION = new PositiveLongValidator(SLICE_TARGET, Long.MAX_VALUE,
       new OptionDescription("The number of records manipulated within a fragment before Drill parallelizes operations."));
 
-  public static final String CAST_TO_NULLABLE_NUMERIC = "drill.exec.functions.cast_empty_string_to_null";
-  public static final BooleanValidator CAST_TO_NULLABLE_NUMERIC_OPTION = new BooleanValidator(CAST_TO_NULLABLE_NUMERIC,
+  public static final String CAST_EMPTY_STRING_TO_NULL = "drill.exec.functions.cast_empty_string_to_null";
+  public static final BooleanValidator CAST_EMPTY_STRING_TO_NULL_OPTION = new BooleanValidator(CAST_EMPTY_STRING_TO_NULL,
       new OptionDescription("In a text file, treat empty fields as NULL values instead of empty string."));
 
   /**
@@ -808,7 +827,8 @@ public final class ExecConstants {
   public static final String ENABLE_ITERATOR_VALIDATION = "drill.exec.debug.validate_iterators";
 
   public static final String QUERY_ROWKEYJOIN_BATCHSIZE_KEY = "exec.query.rowkeyjoin_batchsize";
-  public static final PositiveLongValidator QUERY_ROWKEYJOIN_BATCHSIZE = new PositiveLongValidator(QUERY_ROWKEYJOIN_BATCHSIZE_KEY, Long.MAX_VALUE, null);
+  public static final PositiveLongValidator QUERY_ROWKEYJOIN_BATCHSIZE = new PositiveLongValidator(QUERY_ROWKEYJOIN_BATCHSIZE_KEY, Long.MAX_VALUE,
+      new OptionDescription("Batch size (in terms of number of rows) for a 'bulk get' operation from the underlying data source during a RowKeyJoin."));
   /**
    * When iterator validation is enabled, additionally validates the vectors in
    * each batch passed to each iterator.
@@ -860,5 +880,10 @@ public final class ExecConstants {
 
   public static final String LIST_FILES_RECURSIVELY = "storage.list_files_recursively";
   public static final BooleanValidator LIST_FILES_RECURSIVELY_VALIDATOR = new BooleanValidator(LIST_FILES_RECURSIVELY,
-      new OptionDescription("Enables recursive files listing when querying the `INFORMATION_SCHEMA.FILES` table or executing the SHOW FILES command. Default is false. (Drill 1.15+"));
+      new OptionDescription("Enables recursive files listing when querying the `INFORMATION_SCHEMA.FILES` table or executing the SHOW FILES command. Default is false. (Drill 1.15+)"));
+
+  public static final String RETURN_RESULT_SET_FOR_DDL = "exec.return_result_set_for_ddl";
+  public static final BooleanValidator RETURN_RESULT_SET_FOR_DDL_VALIDATOR = new BooleanValidator(RETURN_RESULT_SET_FOR_DDL,
+      new OptionDescription("Controls whether to return result set for CREATE TABLE/VIEW, DROP TABLE/VIEW, SET, USE etc. queries. " +
+          "If set to false affected rows count will be returned instead and result set will be null. Default is true. (Drill 1.15+)"));
 }

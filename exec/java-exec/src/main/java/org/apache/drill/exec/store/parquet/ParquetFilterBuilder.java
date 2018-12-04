@@ -17,13 +17,15 @@
  */
 package org.apache.drill.exec.store.parquet;
 
+import org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers;
+import org.apache.drill.exec.expr.holders.VarCharHolder;
 import org.apache.drill.shaded.guava.com.google.common.collect.ImmutableSet;
 import org.apache.drill.common.expression.BooleanOperator;
 import org.apache.drill.common.expression.FunctionHolderExpression;
 import org.apache.drill.common.expression.LogicalExpression;
 import org.apache.drill.common.expression.TypedFieldExpr;
 import org.apache.drill.common.expression.ValueExpressions;
-import org.apache.drill.common.expression.fn.CastFunctions;
+import org.apache.drill.common.expression.fn.FunctionReplacementUtils;
 import org.apache.drill.common.expression.fn.FuncHolder;
 import org.apache.drill.common.expression.visitors.AbstractExprVisitor;
 import org.apache.drill.common.types.TypeProtos;
@@ -61,6 +63,12 @@ public class ParquetFilterBuilder extends AbstractExprVisitor<LogicalExpression,
   static final Logger logger = LoggerFactory.getLogger(ParquetFilterBuilder.class);
 
   private final UdfUtilities udfUtilities;
+  // Flag to check whether predicate cannot be fully converted
+  // to parquet filter predicate without omitting its parts.
+  // It should be set to false for the case when we want to
+  // verify that predicate is fully convertible to parquet filter predicate,
+  // otherwise null is returned instead of the converted expression.
+  private final boolean omitUnsupportedExprs;
 
   /**
    * @param expr materialized filter expression
@@ -69,18 +77,24 @@ public class ParquetFilterBuilder extends AbstractExprVisitor<LogicalExpression,
    *
    * @return parquet filter predicate
    */
-  public static ParquetFilterPredicate buildParquetFilterPredicate(LogicalExpression expr, final Set<LogicalExpression> constantBoundaries, UdfUtilities udfUtilities) {
-    LogicalExpression logicalExpression = expr.accept(new ParquetFilterBuilder(udfUtilities), constantBoundaries);
+  public static ParquetFilterPredicate buildParquetFilterPredicate(LogicalExpression expr,
+      Set<LogicalExpression> constantBoundaries, UdfUtilities udfUtilities, boolean omitUnsupportedExprs) {
+    LogicalExpression logicalExpression =
+        expr.accept(new ParquetFilterBuilder(udfUtilities, omitUnsupportedExprs), constantBoundaries);
     if (logicalExpression instanceof ParquetFilterPredicate) {
       return (ParquetFilterPredicate) logicalExpression;
+    } else if (logicalExpression instanceof TypedFieldExpr) {
+      // Calcite simplifies `= true` expression to field name, wrap it with is true predicate
+      return (ParquetFilterPredicate) ParquetIsPredicate.createIsPredicate(FunctionGenerationHelper.IS_TRUE, logicalExpression);
     }
     logger.debug("Logical expression {} was not qualified for filter push down", logicalExpression);
     return null;
   }
 
 
-  private ParquetFilterBuilder(UdfUtilities udfUtilities) {
+  private ParquetFilterBuilder(UdfUtilities udfUtilities, boolean omitUnsupportedExprs) {
     this.udfUtilities = udfUtilities;
+    this.omitUnsupportedExprs = omitUnsupportedExprs;
   }
 
   @Override
@@ -145,6 +159,11 @@ public class ParquetFilterBuilder extends AbstractExprVisitor<LogicalExpression,
   }
 
   @Override
+  public LogicalExpression visitQuotedStringConstant(ValueExpressions.QuotedString quotedString, Set<LogicalExpression> value) throws RuntimeException {
+    return quotedString;
+  }
+
+  @Override
   public LogicalExpression visitBooleanOperator(BooleanOperator op, Set<LogicalExpression> value) {
     List<LogicalExpression> childPredicates = new ArrayList<>();
     String functionName = op.getName();
@@ -152,8 +171,9 @@ public class ParquetFilterBuilder extends AbstractExprVisitor<LogicalExpression,
     for (LogicalExpression arg : op.args) {
       LogicalExpression childPredicate = arg.accept(this, value);
       if (childPredicate == null) {
-        if (functionName.equals("booleanOr")) {
+        if (functionName.equals("booleanOr") || !omitUnsupportedExprs) {
           // we can't include any leg of the OR if any of the predicates cannot be converted
+          // or prohibited omitting of unconverted operands
           return null;
         }
       } else {
@@ -176,31 +196,35 @@ public class ParquetFilterBuilder extends AbstractExprVisitor<LogicalExpression,
 
   private LogicalExpression getValueExpressionFromConst(ValueHolder holder, TypeProtos.MinorType type) {
     switch (type) {
-    case INT:
-      return ValueExpressions.getInt(((IntHolder) holder).value);
-    case BIGINT:
-      return ValueExpressions.getBigInt(((BigIntHolder) holder).value);
-    case FLOAT4:
-      return ValueExpressions.getFloat4(((Float4Holder) holder).value);
-    case FLOAT8:
-      return ValueExpressions.getFloat8(((Float8Holder) holder).value);
-    case VARDECIMAL:
-      VarDecimalHolder decimalHolder = (VarDecimalHolder) holder;
-      return ValueExpressions.getVarDecimal(
-          DecimalUtility.getBigDecimalFromDrillBuf(decimalHolder.buffer,
-              decimalHolder.start, decimalHolder.end - decimalHolder.start, decimalHolder.scale),
-          decimalHolder.precision,
-          decimalHolder.scale);
-    case DATE:
-      return ValueExpressions.getDate(((DateHolder) holder).value);
-    case TIMESTAMP:
-      return ValueExpressions.getTimeStamp(((TimeStampHolder) holder).value);
-    case TIME:
-      return ValueExpressions.getTime(((TimeHolder) holder).value);
-    case BIT:
-      return ValueExpressions.getBit(((BitHolder) holder).value == 1);
-    default:
-      return null;
+      case INT:
+        return ValueExpressions.getInt(((IntHolder) holder).value);
+      case BIGINT:
+        return ValueExpressions.getBigInt(((BigIntHolder) holder).value);
+      case FLOAT4:
+        return ValueExpressions.getFloat4(((Float4Holder) holder).value);
+      case FLOAT8:
+        return ValueExpressions.getFloat8(((Float8Holder) holder).value);
+      case VARDECIMAL:
+        VarDecimalHolder decimalHolder = (VarDecimalHolder) holder;
+        return ValueExpressions.getVarDecimal(
+            DecimalUtility.getBigDecimalFromDrillBuf(decimalHolder.buffer,
+                decimalHolder.start, decimalHolder.end - decimalHolder.start, decimalHolder.scale),
+            decimalHolder.precision,
+            decimalHolder.scale);
+      case DATE:
+        return ValueExpressions.getDate(((DateHolder) holder).value);
+      case TIMESTAMP:
+        return ValueExpressions.getTimeStamp(((TimeStampHolder) holder).value);
+      case TIME:
+        return ValueExpressions.getTime(((TimeHolder) holder).value);
+      case BIT:
+        return ValueExpressions.getBit(((BitHolder) holder).value == 1);
+      case VARCHAR:
+        VarCharHolder varCharHolder = (VarCharHolder) holder;
+        String value = StringFunctionHelpers.toStringFromUTF8(varCharHolder.start, varCharHolder.end, varCharHolder.buffer);
+        return ValueExpressions.getChar(value, value.length());
+      default:
+        return null;
     }
   }
 
@@ -236,7 +260,7 @@ public class ParquetFilterBuilder extends AbstractExprVisitor<LogicalExpression,
       return handleIsFunction(funcHolderExpr, value);
     }
 
-    if (CastFunctions.isCastFunction(funcName)) {
+    if (FunctionReplacementUtils.isCastFunction(funcName)) {
       List<LogicalExpression> newArgs = generateNewExpressions(funcHolderExpr.args, value);
       if (newArgs == null) {
         return null;

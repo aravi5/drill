@@ -71,7 +71,8 @@
       </div>
     </div>
     <div class="form-group">
-      <label for="query">Query</label>
+      <div style="display: inline-block"><label for="query">Query</label></div>
+      <div style="display: inline-block; float:right; padding-right:5%"><b>Hint: </b>Use <div id="keyboardHint" style="display:inline-block; font-style:italic"></div> to submit</div>
       <div id="query-editor-format"></div>
       <input class="form-control" type="hidden" id="query" name="query"/>
     </div>
@@ -102,7 +103,7 @@
     editor.$blockScrolling = "Infinity";
     //CSS Formatting
     document.getElementById('query-editor-format').style.fontSize='13px';
-    document.getElementById('query-editor-format').style.fontFamily='courier';
+    document.getElementById('query-editor-format').style.fontFamily='courier,monospace';
     document.getElementById('query-editor-format').style.lineHeight='1.5';
     document.getElementById('query-editor-format').style.width='98%';
     document.getElementById('query-editor-format').style.margin='auto';
@@ -110,6 +111,21 @@
       enableSnippets: true,
       enableBasicAutocompletion: true,
       enableLiveAutocompletion: false
+    });
+
+    //Provides hint based on OS
+    var browserOS = navigator.platform.toLowerCase();
+    if ((browserOS.indexOf("mac") > -1)) {
+      document.getElementById('keyboardHint').innerHTML="Meta+Enter";
+    } else {
+      document.getElementById('keyboardHint').innerHTML="Ctrl+Enter";
+    }
+
+    // meta+enter / ctrl+enter to submit query
+    document.getElementById('queryForm')
+            .addEventListener('keydown', function(e) {
+      if (!(e.keyCode == 13 && (e.metaKey || e.ctrlKey))) return;
+      if (e.target.form) doSubmitQueryWithUserName();
     });
   </script>
 

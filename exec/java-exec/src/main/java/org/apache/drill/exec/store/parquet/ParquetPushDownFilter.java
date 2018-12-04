@@ -18,8 +18,6 @@
 package org.apache.drill.exec.store.parquet;
 
 import org.apache.drill.shaded.guava.com.google.common.base.Stopwatch;
-import org.apache.drill.shaded.guava.com.google.common.collect.ImmutableList;
-import org.apache.drill.shaded.guava.com.google.common.collect.Lists;
 import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptRuleCall;
 import org.apache.calcite.plan.RelOptRuleOperand;
@@ -30,9 +28,7 @@ import org.apache.calcite.rex.RexUtil;
 import org.apache.drill.common.expression.LogicalExpression;
 import org.apache.drill.common.expression.ValueExpressions;
 import org.apache.drill.exec.expr.stat.ParquetFilterPredicate;
-import org.apache.drill.exec.expr.stat.ParquetFilterPredicate.RowsMatch;
 import org.apache.drill.exec.ops.OptimizerRulesContext;
-import org.apache.drill.exec.physical.base.GroupScan;
 import org.apache.drill.exec.planner.common.DrillRelOptUtil;
 import org.apache.drill.exec.planner.logical.DrillOptiq;
 import org.apache.drill.exec.planner.logical.DrillParseContext;
@@ -45,6 +41,7 @@ import org.apache.drill.exec.store.StoragePluginOptimizerRule;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -135,59 +132,98 @@ public abstract class ParquetPushDownFilter extends StoragePluginOptimizerRule {
 
     // get a conjunctions of the filter condition. For each conjunction, if it refers to ITEM or FLATTEN expression
     // then we could not pushed down. Otherwise, it's qualified to be pushed down.
-    final List<RexNode> predList = RelOptUtil.conjunctions(condition);
+    final List<RexNode> predList = RelOptUtil.conjunctions(RexUtil.toCnf(filter.getCluster().getRexBuilder(), condition));
 
-    final List<RexNode> qualifiedPredList = Lists.newArrayList();
+    final List<RexNode> qualifiedPredList = new ArrayList<>();
 
-    for (final RexNode pred : predList) {
-      if (DrillRelOptUtil.findOperators(pred, ImmutableList.of(), BANNED_OPERATORS) == null) {
+    // list of predicates which cannot be converted to parquet filter predicate
+    List<RexNode> nonConvertedPredList = new ArrayList<>();
+
+    for (RexNode pred : predList) {
+      if (DrillRelOptUtil.findOperators(pred, Collections.emptyList(), BANNED_OPERATORS) == null) {
+        LogicalExpression drillPredicate = DrillOptiq.toDrill(
+            new DrillParseContext(PrelUtil.getPlannerSettings(call.getPlanner())), scan, pred);
+
+        // checks whether predicate may be used for filter pushdown
+        ParquetFilterPredicate parquetFilterPredicate =
+            groupScan.getParquetFilterPredicate(drillPredicate,
+                optimizerContext,
+                optimizerContext.getFunctionRegistry(),
+                optimizerContext.getPlannerSettings().getOptions(), false);
+        // collects predicates that contain unsupported for filter pushdown expressions
+        // to build filter with them
+        if (parquetFilterPredicate == null) {
+          nonConvertedPredList.add(pred);
+        }
         qualifiedPredList.add(pred);
+      } else {
+        nonConvertedPredList.add(pred);
       }
     }
 
-    final RexNode qualifedPred = RexUtil.composeConjunction(filter.getCluster().getRexBuilder(), qualifiedPredList, true);
+    final RexNode qualifiedPred = RexUtil.composeConjunction(filter.getCluster().getRexBuilder(), qualifiedPredList, true);
 
-    if (qualifedPred == null) {
+    if (qualifiedPred == null) {
       return;
     }
 
     LogicalExpression conditionExp = DrillOptiq.toDrill(
-        new DrillParseContext(PrelUtil.getPlannerSettings(call.getPlanner())), scan, qualifedPred);
+        new DrillParseContext(PrelUtil.getPlannerSettings(call.getPlanner())), scan, qualifiedPred);
 
 
     Stopwatch timer = logger.isDebugEnabled() ? Stopwatch.createStarted() : null;
-    final GroupScan newGroupScan = groupScan.applyFilter(conditionExp,optimizerContext,
+    AbstractParquetGroupScan newGroupScan = groupScan.applyFilter(conditionExp, optimizerContext,
         optimizerContext.getFunctionRegistry(), optimizerContext.getPlannerSettings().getOptions());
     if (timer != null) {
       logger.debug("Took {} ms to apply filter on parquet row groups. ", timer.elapsed(TimeUnit.MILLISECONDS));
       timer.stop();
     }
 
-    if (newGroupScan == null ) {
+    // For the case when newGroupScan wasn't created, the old one may
+    // fully match the filter for the case when row group pruning did not happen.
+    if (newGroupScan == null) {
+      if (groupScan.isMatchAllRowGroups()) {
+        RelNode child = project == null ? scan : project;
+        // If current row group fully matches filter,
+        // but row group pruning did not happen, remove the filter.
+        if (nonConvertedPredList.size() == 0) {
+          call.transformTo(child);
+        } else if (nonConvertedPredList.size() == predList.size()) {
+          // None of the predicates participated in filter pushdown.
+          return;
+        } else {
+          // If some of the predicates weren't used in the filter, creates new filter with them
+          // on top of current scan. Excludes the case when all predicates weren't used in the filter.
+          call.transformTo(filter.copy(filter.getTraitSet(), child,
+              RexUtil.composeConjunction(
+                  filter.getCluster().getRexBuilder(),
+                  nonConvertedPredList,
+                  true)));
+        }
+      }
       return;
     }
 
-    RelNode newScan = new ScanPrel(scan.getCluster(), scan.getTraitSet(), newGroupScan, scan.getRowType(), scan.getTable());
+    RelNode newNode = new ScanPrel(scan.getCluster(), scan.getTraitSet(), newGroupScan, scan.getRowType(), scan.getTable());
 
     if (project != null) {
-      newScan = project.copy(project.getTraitSet(), ImmutableList.of(newScan));
+      newNode = project.copy(project.getTraitSet(), Collections.singletonList(newNode));
     }
 
-    if (newGroupScan instanceof AbstractParquetGroupScan) {
-      RowsMatch matchAll = RowsMatch.ALL;
-      List<RowGroupInfo> rowGroupInfos = ((AbstractParquetGroupScan) newGroupScan).rowGroupInfos;
-      for (RowGroupInfo rowGroup : rowGroupInfos) {
-        if (rowGroup.getRowsMatch() != RowsMatch.ALL) {
-          matchAll = RowsMatch.SOME;
-          break;
-        }
+    if (newGroupScan.isMatchAllRowGroups()) {
+      // creates filter from the expressions which can't be pushed to the scan
+      if (nonConvertedPredList.size() > 0) {
+        newNode = filter.copy(filter.getTraitSet(), newNode,
+            RexUtil.composeConjunction(
+                filter.getCluster().getRexBuilder(),
+                nonConvertedPredList,
+                true));
       }
-      if (matchAll == ParquetFilterPredicate.RowsMatch.ALL) {
-        call.transformTo(newScan);
-      }
+      call.transformTo(newNode);
+      return;
     }
 
-    final RelNode newFilter = filter.copy(filter.getTraitSet(), ImmutableList.<RelNode>of(newScan));
+    final RelNode newFilter = filter.copy(filter.getTraitSet(), Collections.singletonList(newNode));
     call.transformTo(newFilter);
   }
 }
