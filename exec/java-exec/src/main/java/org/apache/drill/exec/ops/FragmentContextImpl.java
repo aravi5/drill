@@ -530,11 +530,11 @@ public class FragmentContextImpl extends BaseFragmentContext implements Executor
     // Close the buffers before closing the operators; this is needed as buffer ownership
     // is attached to the receive operators.
     suppressingClose(buffers);
-    closeNotConsumedRFWs();
     // close operator context
     for (OperatorContextImpl opContext : contexts) {
       suppressingClose(opContext);
     }
+    closeNotConsumedRFWs();
     suppressingClose(bufferManager);
     suppressingClose(allocator);
   }
