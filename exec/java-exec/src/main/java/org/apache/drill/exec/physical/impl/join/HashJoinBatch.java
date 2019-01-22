@@ -213,6 +213,7 @@ public class HashJoinBatch extends AbstractBinaryRecordBatch<HashJoinPOP> implem
   private Map<BloomFilter, Integer> bloomFilter2buildId = new HashMap<>();
   private Map<BloomFilterDef, Integer> bloomFilterDef2buildId = new HashMap<>();
   private List<BloomFilter> bloomFilters = new ArrayList<>();
+  private boolean bloomFiltersGenerated = false;
 
   /**
    * This holds information about the spilled partitions for the build and probe side.
@@ -819,7 +820,7 @@ public class HashJoinBatch extends AbstractBinaryRecordBatch<HashJoinPOP> implem
   }
 
   private void initializeRuntimeFilter() {
-    if (!enableRuntimeFilter) {
+    if (!enableRuntimeFilter || bloomFiltersGenerated) {
       return;
     }
     runtimeFilterReporter = new RuntimeFilterReporter((ExecutorFragmentContext) context);
@@ -838,6 +839,7 @@ public class HashJoinBatch extends AbstractBinaryRecordBatch<HashJoinPOP> implem
         bloomFilter2buildId.put(bloomFilter, buildFieldId);
       }
     }
+    bloomFiltersGenerated = true;
   }
 
   /**
